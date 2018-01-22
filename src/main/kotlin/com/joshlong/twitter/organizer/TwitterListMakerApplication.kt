@@ -1,6 +1,5 @@
 package com.joshlong.twitter.organizer
 
-import org.apache.commons.logging.LogFactory
 import org.springframework.batch.core.ExitStatus
 import org.springframework.batch.core.Job
 import org.springframework.batch.core.Step
@@ -8,19 +7,17 @@ import org.springframework.batch.core.configuration.annotation.EnableBatchProces
 import org.springframework.batch.core.configuration.annotation.JobBuilderFactory
 import org.springframework.batch.core.configuration.annotation.StepBuilderFactory
 import org.springframework.batch.core.launch.support.RunIdIncrementer
+import org.springframework.batch.core.step.tasklet.TaskletStep
 import org.springframework.batch.item.ItemReader
 import org.springframework.batch.item.ItemWriter
 import org.springframework.batch.item.database.builder.JdbcBatchItemWriterBuilder
 import org.springframework.batch.item.support.IteratorItemReader
 import org.springframework.batch.repeat.RepeatStatus
 import org.springframework.boot.autoconfigure.SpringBootApplication
-import org.springframework.boot.autoconfigure.batch.JobExecutionEvent
 import org.springframework.boot.context.properties.EnableConfigurationProperties
 import org.springframework.boot.runApplication
-import org.springframework.context.ApplicationListener
 import org.springframework.context.annotation.Bean
 import org.springframework.context.annotation.Configuration
-import org.springframework.context.support.GenericApplicationContext
 import org.springframework.jdbc.core.JdbcTemplate
 import org.springframework.jdbc.core.RowMapper
 import org.springframework.social.twitter.api.Twitter
@@ -33,15 +30,6 @@ import javax.sql.DataSource
 fun main(args: Array<String>) {
 	runApplication<TwitterListMakerApplication>(*args)
 }
-/*
-
-@ConfigurationProperties(prefix = "organizer")
-class TwitterOrganizerProperties(val clientKey: String? = null,
-                                 val clientKeySecret: String? = null,
-                                 val accessToken: String? = null,
-                                 val accessTokenSecret: String? = null)
-*/
-
 
 /**
  * TODO
@@ -61,132 +49,60 @@ class TwitterOrganizerProperties(val clientKey: String? = null,
 @EnableBatchProcessing
 class TwitterListMakerApplication {
 
-	private val log = LogFactory.getLog(javaClass)
-
 	@Bean
 	fun jdbcTemplate(ds: DataSource) = JdbcTemplate(ds)
 
-	/**
-	 * We want to shutdown the node once we've done whatever we need to.
-	 */
 	@Bean
-	fun listener(ac: GenericApplicationContext) = ApplicationListener<JobExecutionEvent> {
-		log.debug(it.jobExecution.exitStatus)
-		val done = it.jobExecution.exitStatus == ExitStatus.COMPLETED
-		if (done) {
-			ac.close()
-		}
-	}
+	fun twitter(props: TwitterOrganizerProperties) = TwitterTemplate(props.clientKey, props.clientKeySecret, props.accessToken, props.accessTokenSecret)
+}
 
-	@Configuration
-	class IsProfileIdsEmptyStepConfig(
-			private val jdbcTemplate: JdbcTemplate,
-			private val stepBuilderFactory: StepBuilderFactory) {
-
-		companion object {
-			const val IMPORT_PROFILE_IDS = "IMPORT_PROFILE_IDS"
-		}
-
-		@Bean
-		fun step(): Step =
-				stepBuilderFactory
-						.get("is-profile-ids-empty")
-						.tasklet({ contribution, _ ->
-
-
-							//							val import = this.jdbcTemplate.queryForObject("SELECT COUNT(*) FROM PROFILE_IDS", Long::class.java) == 0L
-//							println("import? $import")
-
-							val import = false
-							contribution.exitStatus =
-									if (import)
-										ExitStatus(IsProfileIdsEmptyStepConfig.IMPORT_PROFILE_IDS)
-									else
-										ExitStatus.COMPLETED
-							/*		if (import)
-										ExitStatus(IsProfileIdsEmptyStepConfig.IMPORT_PROFILE_IDS)
-									else
-										ExitStatus.COMPLETED*/
-
-							RepeatStatus.FINISHED
-
-						})
-						.build()
-	}
-
-	/**
-	 * this step manages the first step: import en-masse all the follower IDs from Twitter.
-	 * This is an action we can take in one API call (I think).
-	 */
-	@Configuration
-	class ImportProfileIdsStepConfig(val twitter: Twitter,
-	                                 val ds: DataSource,
-	                                 val sbf: StepBuilderFactory) {
-
-		@Bean
-		fun reader(): ItemReader<Long> =
-				IteratorItemReader<Long>(twitter.friendOperations().friendIds.iterator())
-
-		@Bean
-		fun writer(): ItemWriter<Long> =
-				JdbcBatchItemWriterBuilder<Long>()
-						.sql(" replace into PROFILE_IDS(ID) values(?) ") // MySQL-nese for 'upsert'
-						.dataSource(ds)
-						.itemPreparedStatementSetter { id, ps -> ps.setLong(1, id) }
-						.build()
-
-		@Bean
-		fun step(): Step =
-				sbf.get("fetch-all-twitter-ids")
-						.chunk<Long, Long>(10000)
-						.reader(this.reader())
-						.writer(this.writer())
-						.build()
+@Configuration
+class JobConfiguration(val jdbcTemplate: JdbcTemplate,
+                       val jbf: JobBuilderFactory,
+                       val sbf: StepBuilderFactory) {
+	companion object {
+		const val IMPORT_PROFILE_IDS = "IMPORT_PROFILE_IDS"
 	}
 
 	@Bean
-	fun job(jbf: JobBuilderFactory,
-	        sbf: StepBuilderFactory,
-	        isProfileIdsEmptyStepConfigConfig: IsProfileIdsEmptyStepConfig,
-	        importProfileIdsStepConfigConfig: ImportProfileIdsStepConfig): Job {
+	fun startTasklet(): TaskletStep =
+			sbf
+					.get("is-profile-ids-empty")
+					.tasklet({ contribution, _ ->
+						val import = this.jdbcTemplate.queryForObject("SELECT COUNT(*) FROM PROFILE_IDS", Long::class.java) == 0L
+						contribution.exitStatus =
+								if (import)
+									ExitStatus(IMPORT_PROFILE_IDS)
+								else
+									ExitStatus.COMPLETED
+						RepeatStatus.FINISHED
+					})
+					.build()
 
-		val taskletStep = sbf
-				.get("tasklet")
-				.tasklet({ contribution, chunkContext ->
-					println("finishing...")
-					RepeatStatus.FINISHED
-				})
-				.build()
+	@Bean
+	fun endTasklet(): TaskletStep =
+			sbf
+					.get("endTasklet")
+					.tasklet({ contribution, chunkContext ->
+						println("finishing...")
+						RepeatStatus.FINISHED
+					})
+					.build()
 
-		val importProfileIdsStep = importProfileIdsStepConfigConfig.step()
-		val isProfileIdsEmpty = isProfileIdsEmptyStepConfigConfig.step()
-
-
-		val finishExitStatus = ExitStatus.COMPLETED.exitCode
-
-		val importStep = sbf
-				.get("importStep")
-				.tasklet { c, e ->
-					println("importStep!")
-					RepeatStatus.FINISHED
-				}
-				.build()
-
+	@Bean
+	fun job(importProfileIdsStepConfigConfig: ImportProfileIdsStepConfig): Job {
+		val isProfileIdsEmpty = startTasklet()
+		val importStep = importProfileIdsStepConfigConfig.step()
+		val endTasklet = endTasklet()
 		return jbf
 				.get("twitter-organizer")
 				.incrementer(RunIdIncrementer())
-				.flow(isProfileIdsEmpty).on(IsProfileIdsEmptyStepConfig.IMPORT_PROFILE_IDS).to(importStep)
-				.from(isProfileIdsEmpty).on("*").to(taskletStep)
-				.from(importStep).on("*").to(taskletStep)
+				.flow(isProfileIdsEmpty).on(IMPORT_PROFILE_IDS).to(importStep)
+				.from(isProfileIdsEmpty).on("*").to(endTasklet)
+				.from(importStep).on("*").to(endTasklet)
 				.build()
 				.build()
-
 	}
-
-
-	@Bean
-	fun twitter(props: TwitterOrganizerProperties) = TwitterTemplate(props.clientKey, props.clientKeySecret,
-			props.accessToken, props.accessTokenSecret)
 }
 
 class Profile(var id: Long,
@@ -208,6 +124,41 @@ class FollowingRowMapper : RowMapper<Profile> {
 					rs.getString("description"),
 					rs.getString("screen_name"))
 }
+
+
+/**
+ * this startTasklet manages the first startTasklet: import en-masse all the follower IDs from Twitter.
+ * This is an action we can take in one API call (I think).
+ */
+@Configuration
+class ImportProfileIdsStepConfig(val twitter: Twitter,
+                                 val ds: DataSource,
+                                 val sbf: StepBuilderFactory) {
+
+	@Bean
+	fun reader(): ItemReader<Long> {
+		val friendIds = twitter.friendOperations().friendIds
+		val iterator = friendIds.iterator()
+		return IteratorItemReader<Long>(iterator)
+	}
+
+	@Bean
+	fun writer(): ItemWriter<Long> =
+			JdbcBatchItemWriterBuilder<Long>()
+					.sql(" insert into PROFILE_IDS(ID) values(?) ") // MySQL-nese for 'upsert'
+					.dataSource(ds)
+					.itemPreparedStatementSetter { id, ps -> ps.setLong(1, id) }
+					.build()
+
+	@Bean
+	fun step(): Step =
+			sbf.get("fetch-all-twitter-ids")
+					.chunk<Long, Long>(10000)
+					.reader(this.reader())
+					.writer(this.writer())
+					.build()
+}
+
 
 /*
 

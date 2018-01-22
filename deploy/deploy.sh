@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-APP_NAME=twitter-ingest-job
+APP_NAME=twitter-organizer
 JOB_NAME=${APP_NAME}
 SCHEDULER_SERVICE_NAME=scheduler-joshlong
 
@@ -9,14 +9,13 @@ cf d -f ${APP_NAME} # delete if it already exists, just in case
 cf push -b java_buildpack -u none --no-route --no-start -p target/${APP_NAME}.jar ${APP_NAME}
 cf set-health-check $APP_NAME none
 
-
 # scheduler
 cf s | grep ${SCHEDULER_SERVICE_NAME} || cf cs scheduler-for-pcf standard ${SCHEDULER_SERVICE_NAME}
 cf bs ${APP_NAME} ${SCHEDULER_SERVICE_NAME}
 
-REDIS_NAME=redis-cache
-cf s | grep ${REDIS_NAME} || cf cs rediscloud 100mb ${REDIS_NAME}
-cf bs ${APP_NAME} ${REDIS_NAME}
+MYSQL_NAME=${APP_NAME}-db
+cf s | grep ${MYSQL_NAME} || cf cs cleardb spark ${MYSQL_NAME}
+cf bs ${APP_NAME} ${MYSQL_NAME}
 
 cf set-env ${APP_NAME} PINBOARD_TOKEN ${PINBOARD_TOKEN}
 cf set-env ${APP_NAME} TWITTER_TWI_CLIENT_KEY ${TWITTER_TWI_CLIENT_KEY}

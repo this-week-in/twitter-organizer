@@ -147,7 +147,7 @@ class EnrichProfileStepConfiguration(
 			JdbcCursorItemReaderBuilder<Long>()
 					.name("profile-id-reader")
 					.dataSource(ds)
-					.sql(" select ID from PROFILE_IDS where processed IS NULL LIMIT 100 ")
+					.sql(" select ID from PROFILE_IDS where processed IS NULL LIMIT 500 ")
 					.dataSource(this.ds)
 					.rowMapper({ rs, _ -> rs.getLong("ID") })
 					.build()

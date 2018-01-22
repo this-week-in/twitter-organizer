@@ -24,10 +24,8 @@ import org.springframework.boot.runApplication
 import org.springframework.context.annotation.Bean
 import org.springframework.context.annotation.Configuration
 import org.springframework.jdbc.core.JdbcTemplate
-import org.springframework.jdbc.core.RowMapper
 import org.springframework.social.twitter.api.Twitter
 import org.springframework.social.twitter.api.impl.TwitterTemplate
-import java.sql.ResultSet
 import java.time.Instant
 import java.time.ZoneId
 import javax.sql.DataSource
@@ -74,7 +72,7 @@ class JobConfiguration(val template: JdbcTemplate,
 	}
 
 	@Bean
-	fun startTasklet(): TaskletStep =
+	fun determineIfProfileIdsTableIsEmptyStep(): TaskletStep =
 			sbf
 					.get("is-profile-ids-empty")
 					.tasklet({ contribution, _ ->
@@ -97,11 +95,18 @@ class JobConfiguration(val template: JdbcTemplate,
 					.build()
 
 	@Bean
-	fun endTasklet(): TaskletStep =
+	fun markProfilesAsProcessedStep(): TaskletStep =
 			sbf
-					.get("endTasklet")
+					.get("mark-as-processed")
 					.tasklet({ contribution, _ ->
-						log.info("finishing the job @ ${Instant.now().atZone(ZoneId.systemDefault())}")
+						// select pids.id  from PROFILE_IDS pids where pids.ID in (select p.id from PROFILE p ) ;
+						this.log.info("finishing the job @ ${Instant.now().atZone(ZoneId.systemDefault())}")
+						this.template.update(
+								"""
+									UPDATE PROFILE_IDS pi SET pi.processed = NOW() WHERE pi.id IN ( SELECT p.id FROM PROFILE p )
+									"""
+										.trimMargin())
+
 						RepeatStatus.FINISHED
 					})
 					.build()
@@ -109,11 +114,10 @@ class JobConfiguration(val template: JdbcTemplate,
 	@Bean
 	fun job(importConfig: ImportProfileIdsStepConfiguration,
 	        enrichConfig: EnrichProfileStepConfiguration): Job {
-		val isProfileIdsEmpty = this.startTasklet()
-		val endTasklet = this.endTasklet()
+		val isProfileIdsEmpty = this.determineIfProfileIdsTableIsEmptyStep()
+		val endTasklet = this.markProfilesAsProcessedStep()
 		val importStep = importConfig.importProfileIdsStep()
 		val enrichStep = enrichConfig.enrichProfilesStep()
-
 		return jbf
 				.get("twitter-organizer")
 				.incrementer(RunIdIncrementer())
@@ -126,6 +130,9 @@ class JobConfiguration(val template: JdbcTemplate,
 	}
 }
 
+/**
+ * Turn all the IDs in the PROFILE_IDS table into entries in the PROFILE table.
+ */
 @Configuration
 class EnrichProfileStepConfiguration(
 		val sbf: StepBuilderFactory,
@@ -140,7 +147,7 @@ class EnrichProfileStepConfiguration(
 			JdbcCursorItemReaderBuilder<Long>()
 					.name("profile-id-reader")
 					.dataSource(ds)
-					.sql(" select ID from PROFILE_IDS LIMIT 10 ")
+					.sql(" select ID from PROFILE_IDS where processed IS NULL LIMIT 100 ")
 					.dataSource(this.ds)
 					.rowMapper({ rs, _ -> rs.getLong("ID") })
 					.build()
@@ -195,18 +202,6 @@ class Profile(
 		var description: String,
 		var screenName: String)
 
-class ProfileRowMapper : RowMapper<Profile> {
-
-	override fun mapRow(rs: ResultSet, indx: Int) =
-			Profile(
-					rs.getLong("id"),
-					rs.getBoolean("following"),
-					rs.getBoolean("verified"),
-					rs.getString("name"),
-					rs.getString("description"),
-					rs.getString("screen_name"))
-}
-
 /**
  * Import all the profile IDs into the staging database table.
  */
@@ -236,126 +231,3 @@ class ImportProfileIdsStepConfiguration(
 					.writer(this.writer())
 					.build()
 }
-
-
-/*
-
-
-@Configuration
-class FollowingStepConfiguration(val jbf: JobBuilderFactory, val sbf: StepBuilderFactory, val ds: DataSource) {
-
-	@Bean
-	fun followingSqlItemReader() = JdbcCursorItemReaderBuilder<Following>()
-			.sql("select * from following")
-			.rowMapper(ProfileRowMapper())
-			.dataSource(ds)
-			.name("followingSqlItemReader")
-			.build()
-
-	@Bean
-	fun enrichingProcessor(twitter: Twitter) = ItemProcessor<Following, Following> { following ->
-		val userProfile = twitter.userOperations().getUserProfile(following.id)
-		following.description = userProfile.description
-		following.following = userProfile.isFollowing
-		following.screenName = userProfile.screenName
-		following.verified = userProfile.isVerified
-		following.name = userProfile.name
-		return@ItemProcessor following
-	}
-
-	@Bean
-	fun followingSqlItemWriter() = null
-}
-
-@Configuration
-class TwitterProfileEnrichmentJobConfiguration*/
-/*
-
-@Component
-class Initializer(val twitter: Twitter,
-                  val tt: TransactionTemplate,
-                  val jdbc: JdbcTemplate) : ApplicationRunner {
-
-
-    val log = LoggerFactory.getLogger(this::class.java)
-    val username = "@starbuxman"
-
-
-    override fun run(args: ApplicationArguments?) {
-
-
-        twitter.friendOperations().friendIds.forEach({ id ->
-            val followingSql = """
-                        INSERT INTO following(
-                            id,
-                            following,
-                            verified,
-                            name,
-                            description,
-                            screen_name
-                        )
-                        VALUES (?, ?, ?, ?, ?, ?)
-                    """
-            jdbc.update(followingSql, id, false, false, null, null, null)
-        })
-
-    }
-}
-*/
-
-
-/*  private fun old() {
-        val maxCursorStateIdSql = """
-            SELECT cs.cursor_state FROM cursor_state cs WHERE cs.id IN (SELECT max(cs1.id) FROM cursor_state cs1)
-        """
-
-        val maxCursorState: List<Long> = jdbc.query(maxCursorStateIdSql, {
-            rs, i ->
-            rs.getLong("cursor_state")
-        })
-        log.info("max cursor state: ${maxCursorState}")
-
-        var friends: CursoredList<TwitterProfile>? = null
-        if (maxCursorState.size == 1) {
-            friends = twitter.friendOperations().getFriendsInCursor(username, maxCursorState.single())
-        } else {
-            friends = twitter.friendOperations().getFriends(username)
-        }
-        do {
-
-            tt.execute {
-                friends!!.forEach({
-                    val followingSql = """
-                        INSERT INTO following(
-                            id,
-                            following,
-                            verified,
-                            name,
-                            description,
-                            screen_name
-                        )
-                        VALUES (?, ?, ?, ?, ?, ?)
-                    """
-                    jdbc.update(followingSql, it.id, it.isFollowing, it.isVerified, it.name, it.description, it.screenName)
-                    log.info("""
-                        id: ${it.id}
-                        isFollowing: ${it.isFollowing}
-                        isVerified: ${it.isVerified}
-                        name: ${it.name}
-                        description: ${it.description}
-                        screen-name: ${it.screenName}
-                    """.split(System.lineSeparator())
-                            .map { it.trim() }
-                            .joinToString(System.lineSeparator())
-                            .trim())
-                })
-                val nextCursor = friends!!.nextCursor
-                friends = twitter.friendOperations().getFriendsInCursor(username, nextCursor)
-                val stateSql = """
-                  INSERT INTO cursor_state(cursor_state) VALUES (?)
-                """
-                jdbc.update(stateSql, nextCursor)
-            }
-
-        } while (friends!!.hasNext())
-    }*/

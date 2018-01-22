@@ -9,6 +9,12 @@ cache:
   directories:
     - $HOME/.m2/repository/
 
+#services:
+#  - mysql
+#
+#before_install:
+#  - mysql -e 'CREATE DATABASE myapp_test;'
+
 before_script:
   - export PATH=$PATH:$HOME/bin/
 

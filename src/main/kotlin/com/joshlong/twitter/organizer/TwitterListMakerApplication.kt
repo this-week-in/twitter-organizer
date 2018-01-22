@@ -56,7 +56,8 @@ class TwitterListMakerApplication {
 	fun jdbcTemplate(ds: DataSource) = JdbcTemplate(ds)
 
 	@Bean
-	fun twitter(props: TwitterOrganizerProperties) = TwitterTemplate(props.clientKey, props.clientKeySecret, props.accessToken, props.accessTokenSecret)
+	fun twitter(props: TwitterOrganizerProperties) =
+			TwitterTemplate(props.clientKey, props.clientKeySecret, props.accessToken, props.accessTokenSecret)
 }
 
 @Configuration
@@ -97,9 +98,9 @@ class JobConfiguration(val jdbcTemplate: JdbcTemplate,
 					.build()
 
 	@Bean
-	fun job(importProfileIdsStepConfigConfig: ImportProfileIdsStepConfig): Job {
+	fun job(importProfileIdsStepConfigConfiguration: ImportProfileIdsStepConfiguration): Job {
 		val isProfileIdsEmpty = startTasklet()
-		val importStep = importProfileIdsStepConfigConfig.step()
+		val importStep = importProfileIdsStepConfigConfiguration.step()
 		val endTasklet = endTasklet()
 		return jbf
 				.get("twitter-organizer")
@@ -120,7 +121,7 @@ class Profile(var id: Long,
               var screenName: String? = null)
 
 @Component
-class FollowingRowMapper : RowMapper<Profile> {
+class ProfileRowMapper : RowMapper<Profile> {
 
 	override fun mapRow(rs: ResultSet, indx: Int) =
 			Profile(
@@ -138,9 +139,10 @@ class FollowingRowMapper : RowMapper<Profile> {
  * This is an action we can take in one API call (I think).
  */
 @Configuration
-class ImportProfileIdsStepConfig(val twitter: Twitter,
-                                 val ds: DataSource,
-                                 val sbf: StepBuilderFactory) {
+class ImportProfileIdsStepConfiguration(
+		val twitter: Twitter,
+		val ds: DataSource,
+		val sbf: StepBuilderFactory) {
 
 	@Bean
 	fun reader(): ItemReader<Long> {
@@ -176,7 +178,7 @@ class FollowingStepConfiguration(val jbf: JobBuilderFactory, val sbf: StepBuilde
 	@Bean
 	fun followingSqlItemReader() = JdbcCursorItemReaderBuilder<Following>()
 			.sql("select * from following")
-			.rowMapper(FollowingRowMapper())
+			.rowMapper(ProfileRowMapper())
 			.dataSource(ds)
 			.name("followingSqlItemReader")
 			.build()

@@ -1,5 +1,6 @@
 package com.joshlong.twitter.organizer
 
+import org.apache.commons.logging.LogFactory
 import org.springframework.batch.core.ExitStatus
 import org.springframework.batch.core.Job
 import org.springframework.batch.core.Step
@@ -24,6 +25,8 @@ import org.springframework.social.twitter.api.Twitter
 import org.springframework.social.twitter.api.impl.TwitterTemplate
 import org.springframework.stereotype.Component
 import java.sql.ResultSet
+import java.time.Instant
+import java.time.ZoneId
 import javax.sql.DataSource
 
 
@@ -60,6 +63,9 @@ class TwitterListMakerApplication {
 class JobConfiguration(val jdbcTemplate: JdbcTemplate,
                        val jbf: JobBuilderFactory,
                        val sbf: StepBuilderFactory) {
+
+	private val log = LogFactory.getLog(javaClass)
+
 	companion object {
 		const val IMPORT_PROFILE_IDS = "IMPORT_PROFILE_IDS"
 	}
@@ -69,6 +75,7 @@ class JobConfiguration(val jdbcTemplate: JdbcTemplate,
 			sbf
 					.get("is-profile-ids-empty")
 					.tasklet({ contribution, _ ->
+						log.info("starting the job @ ${Instant.now().atZone(ZoneId.systemDefault())}")
 						val import = this.jdbcTemplate.queryForObject("SELECT COUNT(*) FROM PROFILE_IDS", Long::class.java) == 0L
 						contribution.exitStatus =
 								if (import)
@@ -84,7 +91,7 @@ class JobConfiguration(val jdbcTemplate: JdbcTemplate,
 			sbf
 					.get("endTasklet")
 					.tasklet({ contribution, chunkContext ->
-						println("finishing...")
+						log.info("finishing the job @ ${Instant.now().atZone(ZoneId.systemDefault())}")
 						RepeatStatus.FINISHED
 					})
 					.build()

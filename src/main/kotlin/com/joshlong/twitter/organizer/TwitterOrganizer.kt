@@ -31,7 +31,7 @@ import java.time.ZoneId
 import javax.sql.DataSource
 
 fun main(args: Array<String>) {
-	runApplication<TwitterListMakerApplication>(*args)
+	runApplication<TwitterOrganizer>(*args)
 }
 
 /**
@@ -39,6 +39,7 @@ fun main(args: Array<String>) {
  * 1. run thru all the followers on twitter for my account
  * 2. store their information into a DB
  * 3. figure out how to sort them into different categories. maybe use neo4j to identify clusters?
+ * 4. unfollow the ones we've flagged for unsubscription.
  *
  * Twitter limits us to 15 calls per 15 minutes, so this will be a job that periodically runs through as many records
  * in the DB as possible, enriches their information and then marks those rows as processed. The next time the job
@@ -50,7 +51,7 @@ fun main(args: Array<String>) {
 @EnableConfigurationProperties(TwitterOrganizerProperties::class)
 @SpringBootApplication
 @EnableBatchProcessing
-class TwitterListMakerApplication {
+class TwitterOrganizer {
 
 	@Bean
 	fun jdbcTemplate(ds: DataSource) = JdbcTemplate(ds)
@@ -80,7 +81,7 @@ class JobConfiguration(val template: JdbcTemplate,
 						log.info("starting the job @ ${Instant.now().atZone(ZoneId.systemDefault())}")
 
 						val import = this.template.queryForObject(
-								"SELECT COUNT(*) FROM PROFILE_IDS", Long::class.java) == 0L
+								"SELECT COUNT(*) FROM profile_ids", Long::class.java) == 0L
 
 						contribution.exitStatus =
 								if (import)
@@ -94,16 +95,18 @@ class JobConfiguration(val template: JdbcTemplate,
 					})
 					.build()
 
+	// todo this should be a bit cleaner.
+	// todo it should reflect that 'processed' = enriched.
 	@Bean
 	fun markProfilesAsProcessedStep(): TaskletStep =
 			sbf
-					.get("mark-as-processed")
+					.get("mark-as-enriched")
 					.tasklet({ contribution, _ ->
 						// select pids.id  from PROFILE_IDS pids where pids.ID in (select p.id from PROFILE p ) ;
 						this.log.info("finishing the job @ ${Instant.now().atZone(ZoneId.systemDefault())}")
 						this.template.update(
 								"""
-									UPDATE PROFILE_IDS pi SET pi.processed = NOW() WHERE pi.id IN ( SELECT p.id FROM PROFILE p )
+									UPDATE profile_ids pi SET pi.processed = NOW() WHERE pi.id IN ( SELECT p.id FROM profile p )
 									"""
 										.trimMargin())
 
@@ -113,22 +116,75 @@ class JobConfiguration(val template: JdbcTemplate,
 
 	@Bean
 	fun job(importConfig: ImportProfileIdsStepConfiguration,
-	        enrichConfig: EnrichProfileStepConfiguration): Job {
+	        enrichConfig: EnrichProfileStepConfiguration,
+	        unfollowConfig: UnfollowStepConfiguration): Job {
 		val isProfileIdsEmpty = this.determineIfProfileIdsTableIsEmptyStep()
 		val endTasklet = this.markProfilesAsProcessedStep()
-		val importStep = importConfig.importProfileIdsStep()
+		val importStep = importConfig.importStep()
 		val enrichStep = enrichConfig.enrichProfilesStep()
+		val unfollowStep = unfollowConfig.unfollowStep()
 		return jbf
 				.get("twitter-organizer")
 				.incrementer(RunIdIncrementer())
 				.flow(isProfileIdsEmpty).on(IMPORT_PROFILE_IDS).to(importStep)
 				.from(importStep).on("*").to(enrichStep)
 				.from(isProfileIdsEmpty).on("*").to(enrichStep)
-				.from(enrichStep).on("*").to(endTasklet)
+				.from(enrichStep).on("*").to(unfollowStep)
+				.from(unfollowStep).on("*").to(endTasklet)
 				.build()
 				.build()
 	}
 }
+
+
+@Configuration
+class UnfollowStepConfiguration(
+		private val sbf: StepBuilderFactory,
+		private val ds: DataSource,
+		private val twitter: Twitter) {
+
+	private val log = LogFactory.getLog(javaClass)
+
+	@Bean
+	fun unfollowReader(): JdbcCursorItemReader<Long> =
+			JdbcCursorItemReaderBuilder<Long>()
+					.name("select-profiles-to-unfollow")
+					.dataSource(ds)
+					.sql(" select ID from profile where followed = 0 and followed_date IS NULL LIMIT 100 ")
+					.dataSource(this.ds)
+					.rowMapper({ rs, _ -> rs.getLong("ID") })
+					.build()
+
+	@Bean
+	fun unfollowProcessor() = ItemProcessor<Long, Long> { profileId ->
+		val friendOperations = twitter.friendOperations()
+		val response = friendOperations.unfollow(profileId)
+		log.info("unfollowed $profileId; response: $response")
+		profileId
+	}
+
+	@Bean
+	fun unfollowWriter(): JdbcBatchItemWriter<Long> =
+			JdbcBatchItemWriterBuilder<Long>()
+					.dataSource(ds)
+					.itemPreparedStatementSetter { profileId, ps ->
+						ps.setLong(1, profileId)
+					}
+					.sql(""" update profile set followed_date = NOW() where id = ?  """)
+					.build()
+
+
+	@Bean
+	fun unfollowStep(): Step =
+			this.sbf
+					.get("unfollow-profile-step")
+					.chunk<Long, Long>(100)
+					.reader(this.unfollowReader())
+					.processor(this.unfollowProcessor())
+					.writer(this.unfollowWriter())
+					.build()
+}
+
 
 /**
  * Turn all the IDs in the PROFILE_IDS table into entries in the PROFILE table.
@@ -143,17 +199,17 @@ class EnrichProfileStepConfiguration(
 
 
 	@Bean
-	fun reader1(): JdbcCursorItemReader<Long> =
+	fun enrichReader(): JdbcCursorItemReader<Long> =
 			JdbcCursorItemReaderBuilder<Long>()
-					.name("profile-id-reader")
+					.name("profile-id-importReader")
 					.dataSource(ds)
-					.sql(" select ID from PROFILE_IDS where processed IS NULL LIMIT 500 ")
+					.sql(" select ID from profile_ids where processed IS NULL LIMIT 500 ")
 					.dataSource(this.ds)
 					.rowMapper({ rs, _ -> rs.getLong("ID") })
 					.build()
 
 	@Bean
-	fun processor1(): ItemProcessor<Long, Profile> = ItemProcessor {
+	fun enrichProcessor(): ItemProcessor<Long, Profile> = ItemProcessor {
 		this.log.debug("enriching ${Profile::class.java.name} for ID# $it.")
 		val profile = twitter.userOperations().getUserProfile(it)
 		Profile(id = profile.id,
@@ -165,7 +221,7 @@ class EnrichProfileStepConfiguration(
 	}
 
 	@Bean
-	fun writer1(): JdbcBatchItemWriter<Profile> =
+	fun enrichWriter(): JdbcBatchItemWriter<Profile> =
 			JdbcBatchItemWriterBuilder<Profile>()
 					.dataSource(ds)
 					.itemPreparedStatementSetter { profile, ps ->
@@ -178,7 +234,7 @@ class EnrichProfileStepConfiguration(
 					}
 					.sql(
 							"""
-						replace into PROFILE( id, following, verified, name, description, screen_name )
+						replace into profile( id, following, verified, name, description, screen_name )
 						values( ?,?,?,?,?,? )
 						"""
 					)
@@ -188,9 +244,9 @@ class EnrichProfileStepConfiguration(
 	fun enrichProfilesStep(): Step =
 			this.sbf.get("enrich-profile-configuration")
 					.chunk<Long, Profile>(100)
-					.reader(this.reader1())
-					.processor(this.processor1())
-					.writer(this.writer1())
+					.reader(this.enrichReader())
+					.processor(this.enrichProcessor())
+					.writer(this.enrichWriter())
 					.build()
 }
 
@@ -212,22 +268,22 @@ class ImportProfileIdsStepConfiguration(
 		val sbf: StepBuilderFactory) {
 
 	@Bean
-	fun reader(): ItemReader<Long> =
+	fun importReader(): ItemReader<Long> =
 			IteratorItemReader<Long>(twitter.friendOperations().friendIds.iterator())
 
 	@Bean
-	fun writer(): ItemWriter<Long> =
+	fun importWriter(): ItemWriter<Long> =
 			JdbcBatchItemWriterBuilder<Long>()
-					.sql(" replace into PROFILE_IDS(ID) values(?) ") // MySQL-nese for 'upsert'
+					.sql(" replace into profile_ids(ID) values(?) ") // MySQL-nese for 'upsert'
 					.dataSource(ds)
 					.itemPreparedStatementSetter { id, ps -> ps.setLong(1, id) }
 					.build()
 
 	@Bean
-	fun importProfileIdsStep(): Step =
+	fun importStep(): Step =
 			sbf.get("fetch-all-twitter-ids")
 					.chunk<Long, Long>(10000)
-					.reader(this.reader())
-					.writer(this.writer())
+					.reader(this.importReader())
+					.writer(this.importWriter())
 					.build()
 }

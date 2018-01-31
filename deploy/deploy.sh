@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-APP_NAME=twitter-organizer
+APP_NAME=twitter-organizer-job
 JOB_NAME=${APP_NAME}
 SCHEDULER_SERVICE_NAME=scheduler-joshlong
 

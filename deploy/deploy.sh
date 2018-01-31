@@ -13,7 +13,7 @@ cf set-health-check $APP_NAME none
 cf s | grep ${SCHEDULER_SERVICE_NAME} || cf cs scheduler-for-pcf standard ${SCHEDULER_SERVICE_NAME}
 cf bs ${APP_NAME} ${SCHEDULER_SERVICE_NAME}
 
-MYSQL_NAME=${APP_NAME}-db
+MYSQL_NAME=twitter-organizer-db
 cf s | grep ${MYSQL_NAME} || cf cs cleardb spark ${MYSQL_NAME}
 cf bs ${APP_NAME} ${MYSQL_NAME}
 

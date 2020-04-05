@@ -1,5 +1,6 @@
 package com.joshlong.twitter.organizer
 
+import com.joshlong.twitter.api.TwitterClient
 import org.apache.commons.logging.LogFactory
 import org.springframework.batch.core.Job
 import org.springframework.batch.core.Step
@@ -23,8 +24,6 @@ import org.springframework.boot.runApplication
 import org.springframework.context.annotation.Bean
 import org.springframework.context.annotation.Configuration
 import org.springframework.jdbc.core.JdbcTemplate
-import org.springframework.social.twitter.api.Twitter
-import org.springframework.social.twitter.api.impl.TwitterTemplate
 import javax.sql.DataSource
 
 fun main(args: Array<String>) {
@@ -54,8 +53,6 @@ class TwitterOrganizer {
 	@Bean
 	fun jdbcTemplate(ds: DataSource) = JdbcTemplate(ds)
 
-	@Bean
-	fun twitter(props: TwitterOrganizerProperties) = TwitterTemplate(props.clientKey, props.clientKeySecret, props.accessToken, props.accessTokenSecret)
 }
 
 @Configuration
@@ -80,7 +77,7 @@ class JobConfiguration(
 class FollowStepConfiguration(
 		private val sbf: StepBuilderFactory,
 		private val ds: DataSource,
-		private val twitter: Twitter) {
+		private val twitterClient: TwitterClient) {
 
 	private val log = LogFactory.getLog(javaClass)
 
@@ -91,24 +88,17 @@ class FollowStepConfiguration(
 					.dataSource(ds)
 					.sql(" select p.ID from profile p where p.following = 1 and p.id not in (select pids.id from profile_ids pids) ")
 					.dataSource(this.ds)
-					.rowMapper({ rs, _ -> rs.getLong("ID") })
+					.rowMapper { rs, _ -> rs.getLong("ID") }
 					.build()
+
+	private fun follow(profileId: Long) {
+		TODO("need to implement this")
+	}
 
 	@Bean
 	fun followStepProcessor() = ItemProcessor<Long, Long> { profileId ->
-		try {
-			twitter
-					.friendOperations()
-					.follow(profileId)
-					.let { response ->
-						log.info("followed $profileId; response: $response")
-						profileId
-					}
-		} catch (e: Exception) {
-			log.debug("we're probably already following this user.")
-			log.debug(e)
-			profileId
-		}
+		follow(profileId)
+		profileId
 	}
 
 	@Bean
@@ -148,13 +138,16 @@ class ResetProfileIdsStepConfiguration(val sbf: StepBuilderFactory, val template
 
 @Configuration
 class ImportProfileIdsStepConfiguration(
-		val twitter: Twitter,
+		val twitter: TwitterClient,
 		val ds: DataSource,
 		val sbf: StepBuilderFactory) {
 
+	// todo
+	private fun readFriendIds(): Iterator<Long> = emptyList<Long>().iterator()
+
 	@Bean
 	fun importProfileIdsReader(): ItemReader<Long> =
-			IteratorItemReader<Long>(twitter.friendOperations().friendIds.iterator())
+			IteratorItemReader(readFriendIds())
 
 	@Bean
 	fun importProfileIdsWriter(): ItemWriter<Long> =
@@ -178,7 +171,7 @@ class ImportProfileIdsStepConfiguration(
 class EnrichProfileStepConfiguration(
 		val sbf: StepBuilderFactory,
 		val ds: DataSource,
-		val twitter: Twitter) {
+		val twitter: TwitterClient) {
 
 	@Bean
 	fun enrichProfileStepReader(): JdbcCursorItemReader<Long> =
@@ -187,21 +180,15 @@ class EnrichProfileStepConfiguration(
 					.dataSource(ds)
 					.sql(" select pids.ID from profile_ids pids where pids.ID not in (select p.ID from profile p) ")
 					.dataSource(this.ds)
-					.rowMapper({ rs, _ -> rs.getLong("ID") })
+					.rowMapper { rs, _ -> rs.getLong("ID") }
 					.build()
 
-	@Bean
-	fun enrichProfileStepProcessor() = ItemProcessor<Long, Profile> {
-		twitter.userOperations().getUserProfile(it)
-				.let { profile ->
-					Profile(id = profile.id,
-							following = profile.isFollowing,
-							verified = profile.isVerified,
-							name = profile.name,
-							description = profile.description,
-							screenName = profile.screenName)
-				}
+	private fun loadProfileFor(profileId: Long): Profile {
+		TODO("need to load the Profile")
 	}
+
+	@Bean
+	fun enrichProfileStepProcessor() = ItemProcessor<Long, Profile> { loadProfileFor(it) }
 
 	@Bean
 	fun enrichProfileStepWriter() = JdbcBatchItemWriterBuilder<Profile>()

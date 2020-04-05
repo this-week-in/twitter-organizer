@@ -2,4 +2,4 @@
 
 ![Build Status](https://github.com/this-week-in/twitter-organizer-job/workflows/CI/badge.svg)
 
-This job looks at my current followers and analyzes them.
+This `job` better orders the accounts with whom I interact on Twitter and stores them for analysis.
